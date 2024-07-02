@@ -28,7 +28,7 @@ https://github.com/sircfenner/AutoImport/assets/25118482/0d9222e1-8094-4982-a716
 ### Installing the plugin
 
 You can pay for a pre-built version of the plugin via the 
-[Roblox Creator Store](https://create.roblox.com/store/asset/14443707366/Auto-Import). Alternatively,
+[Roblox Creator Store](https://create.roblox.com/store/asset/18297441605/Auto-Import). Alternatively,
 follow the steps below to build it yourself, then add it to your local plugins folder.
 
 ### Building the plugin
