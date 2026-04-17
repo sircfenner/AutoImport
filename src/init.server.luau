@@ -1,133 +1,317 @@
+local HttpService = game:GetService("HttpService")
 local ScriptEditorService = game:GetService("ScriptEditorService")
-local RunService = game:GetService("RunService")
+local ReflectionService = game:GetService("ReflectionService")
 
-if not RunService:IsEdit() then
-	return
-end
+local AST = require("@self/AST")
+local Types = require("@self/Types")
 
-local Types = require(script.Parent.Types)
-local getModules = require(script.Parent.getModules)
-local parseScript = require(script.Parent.parseScript)
-local moduleServices = require(script.Parent.moduleServices)
-local services = require(script.Parent.services)
+local ModulesWatcher = require("@self/ModulesWatcher")
 
-local CALLBACK_ID = "sircfenner-auto-import"
+local CALLBACK_ID = "sircfenner-auto-import-2"
+local TEMPLATE_STR = string.gsub(HttpService:GenerateGUID(false), "%-", "")
+
 local PAT_IDENT = `[_%a][_%w]*`
 
-local function isSafeIdentifier(text: string)
-	return string.match(text, `^{PAT_IDENT}$`) ~= nil
+local watcher = ModulesWatcher.create()
+
+local serviceNames = {}
+for _, class in ReflectionService:GetClasses() do
+	if class.Permits.GetService then
+		table.insert(serviceNames, class.Name)
+	end
 end
 
-local function getModuleIdentifier(module: ModuleScript)
-	local name = module.Name
-	if isSafeIdentifier(name) then
-		return name
-	end
+local excludePreceding = {
+	"local",
+	"export",
+	"type",
+	"function",
+}
 
-	name = string.gsub(name, "[^_%w]", "")
+local commonEscapes = {
+	[string.byte("\t")] = "\\t",
+	[string.byte("\n")] = "\\n",
+}
+
+local function getSafeInstanceName(name: string): string?
 	if #name == 0 then
-		name = "_"
-	elseif string.match(string.sub(name, 1, 1), "[^_%a]") then
-		name = `_{name}`
+		return nil
+	elseif name == "." or name == ".." then
+		return nil
+	elseif string.find(name, "/") or string.find(name, "\\") then
+		return nil
+	elseif string.find(name, '"') then
+		return nil
 	end
 
+	local out = {}
+	for i = 1, #name do
+		local b = string.byte(name, i)
+		if b < 32 or b > 126 then
+			out[i] = commonEscapes[b] or `\\{b}`
+		else
+			out[i] = string.char(b)
+		end
+	end
+
+	return table.concat(out)
+end
+
+local function getSafeIdentifier(name: string)
+	if not string.match(name, `^{PAT_IDENT}$`) then
+		name = string.gsub(name, "[^_%w]", "")
+		if #name == 0 then
+			name = "_"
+		elseif string.match(string.sub(name, 1, 1), "[^_%a]") then
+			name = `_{name}`
+		end
+	end
 	return name
 end
 
-local function getModuleProvenance(module: ModuleScript): (Instance, string)
-	local root: Instance?
-	for _, service in moduleServices do
-		if module:IsDescendantOf(service) then
-			root = service
-			break
-		end
+local function getRequirePath(origin: Instance, target: ModuleScript): (string, boolean)
+	local chunks = {}
+	local terminate: Instance
+	if target:IsDescendantOf(origin) then -- descendant
+		table.insert(chunks, "@self")
+		terminate = origin
+	elseif target.Parent == origin.Parent then -- sibling
+		table.insert(chunks, ".")
+		terminate = assert(origin.Parent)
+	else
+		table.insert(chunks, "@game") -- absolute
+		terminate = game
 	end
-	assert(root, "module service not found")
-
-	local path = {}
-	local current: Instance = module
+	local current: Instance = target
+	local valid = true
 	repeat
-		local name = current.Name
-		local item = `.{name}`
-		if not isSafeIdentifier(name) then
-			item = string.format("[%q]", name)
+		local name = getSafeInstanceName(current.Name)
+		if not name then
+			valid = false
+			table.insert(chunks, 2, current.Name)
+		else
+			table.insert(chunks, 2, name)
 		end
-		table.insert(path, 1, item)
-		current = current.Parent :: Instance -- we know that the instance is rooted
-	until current == root
-
-	return root, table.concat(path)
+		current = assert(current.Parent)
+	until current == terminate
+	return table.concat(chunks, "/"), valid
 end
 
-local function getRequires(source: string): Types.Requires
-	local requires = {}
+type FileRequires = { [string]: { line: number } }
+local function getRequires(source: string): FileRequires
+	local records = {}
 	for i, line in string.split(source, "\n") do
-		local identifier = string.match(line, `^local%s*({PAT_IDENT})%s*=%s*require%s*%b()%s*$`)
-		if identifier then
-			requires[identifier] = {
-				lineNumber = i,
+		local ident = string.match(line, `^local%s*({PAT_IDENT})%s*=%s*require%s*%b()%s*$`)
+		if ident then
+			records[ident] = {
+				line = i,
 			}
 		end
 	end
-	return requires
+	return records
 end
 
-local function getServiceAcquisitions(source: string): Types.ServiceAcquisitions
-	local acquisitions = {}
+type FileServiceGets = { [string]: { line: number } }
+local function getServiceGets(source: string): FileServiceGets
+	local records = {}
 	for i, line in string.split(source, "\n") do
 		local identifier, call = string.match(line, `^local%s*({PAT_IDENT})%s*=%s*game%s*:%s*GetService%s*(%b())%s*$`)
 		if identifier and call then
 			local name = string.sub(call, 3, -3) -- ("...")
-			acquisitions[name] = {
-				lineNumber = i,
-				identifier = identifier,
+			records[name] = {
+				line = i,
 			}
 		end
 	end
-	return acquisitions
+	return records
 end
 
-local function isInLongRange(pos: Types.Position, range: Types.Range): boolean
-	local p0 = range.start
-	local p1 = range["end"]
-	if
-		pos.line == p0.line
-		and pos.character >= p0.character
-		and (pos.line < p1.line or pos.character <= p1.character)
-	then
-		return true -- first-line
-	elseif
-		pos.line == p1.line
-		and pos.character <= p1.character
-		and (pos.line > p0.line or pos.character >= p0.character)
-	then
-		return true -- last-line
-	elseif pos.line > p0.line and pos.line < p1.line then
-		return true -- mid-lines
+local function getClosestAncestorPair(inst0: Instance, inst1: Instance): Instance
+	local current = inst0
+	while not current:IsAncestorOf(inst1) do
+		current = assert(current.Parent)
 	end
-	return false
+	return current
 end
 
-local function isInComment(pos: Types.Position, comment: Types.Comment): boolean
-	local range = comment.range
-	if comment.kind == "simple" then
-		return pos.line == range.start.line and pos.character >= range.start.character
+local function getClosestAncestor(insts: { Instance }): Instance
+	local ancestor = getClosestAncestorPair(insts[1], insts[2])
+	for i = 3, #insts do
+		ancestor = getClosestAncestorPair(ancestor, insts[i])
 	end
-	return isInLongRange(pos, range)
+	return ancestor
 end
 
-local function isInString(pos: Types.Position, str: Types.String): boolean
-	local range = str.range
-	if str.kind == "quoted" then
-		local p0 = range.start
-		local p1 = range["end"]
-		return pos.line == p0.line and pos.character >= p0.character and pos.character <= p1.character
+local function findAncestorChild(ancestor: Instance, leaf: Instance): Instance
+	local current = leaf
+	while current.Parent ~= ancestor do
+		current = assert(current.Parent)
 	end
-	return isInLongRange(pos, range)
+	return current
 end
 
-local function isNonBlankLine(text: string?)
-	return text == nil or string.match(text, "%S") ~= nil
+local function buildName(module: ModuleScript, prefix: { Instance }): string
+	if #prefix == 0 then
+		return module.Name
+	end
+
+	local items = { prefix[1].Name }
+	local last = prefix[1]
+
+	for i = 2, #prefix do
+		local item = prefix[i]
+		if item.Parent ~= last then
+			table.insert(items, "...")
+		end
+		table.insert(items, item.Name)
+		last = item
+	end
+
+	return `{module.Name} ({table.concat(items, "/")})`
+end
+
+local function disambiguateModuleNames(
+	name: string,
+	modules: { ModuleScript },
+	prefix: { Instance }
+): { [ModuleScript]: string }
+	local instances = (modules :: any) :: { Instance } -- need a readonly type for `modules`
+	local ancestor = getClosestAncestor(instances)
+
+	local out = {}
+	local groups = {}
+	local basePrefix = table.clone(prefix)
+
+	for _, module in modules do
+		if module == ancestor then
+			out[module] = buildName(module, prefix)
+			table.insert(basePrefix, module)
+		else
+			local child = findAncestorChild(ancestor, module)
+			if not groups[child] then
+				groups[child] = {}
+			end
+			table.insert(groups[child], module)
+		end
+	end
+
+	for child, list in groups do
+		local newPrefix = table.clone(basePrefix)
+		if not (#list == 1 and list[1] == child) then
+			table.insert(newPrefix, child)
+		end
+
+		if #list == 1 then
+			local module = list[1]
+			out[module] = buildName(module, newPrefix)
+		else
+			for module, name in disambiguateModuleNames(name, list, newPrefix) do
+				out[module] = name
+			end
+		end
+	end
+
+	return out
+end
+
+local function computeServiceNewTextTemplate(
+	source: string,
+	position: Types.Position,
+	serviceGets: FileServiceGets,
+	comments: { Types.Comment }
+): string
+	local lastHeaderCommentLine = nil
+	for _, comment in comments do
+		if comment.header then
+			lastHeaderCommentLine = comment.range["end"].line
+		end
+	end
+
+	local lastServiceGetLine = nil
+	for _, record in serviceGets do
+		lastServiceGetLine = math.max(lastServiceGetLine or 0, record.line)
+	end
+
+	local lines = string.split(source, "\n")
+	local writeLine = 1
+	if lastServiceGetLine then
+		writeLine = lastServiceGetLine + 1
+	elseif lastHeaderCommentLine then
+		writeLine = lastHeaderCommentLine + 1
+	end
+
+	local spaceBefore = writeLine - 1 == lastHeaderCommentLine
+	local spaceAfter = lines[writeLine] ~= nil and #lines[writeLine] > 0
+	if spaceBefore then
+		table.insert(lines, writeLine, "")
+		writeLine += 1
+	end
+	table.insert(lines, writeLine, TEMPLATE_STR)
+	if spaceAfter then
+		table.insert(lines, writeLine + 1, "")
+	end
+
+	return table.concat(lines, "\n")
+end
+
+local function computeRequireNewTextTemplate(
+	source: string,
+	position: Types.Position,
+	serviceGets: FileServiceGets,
+	requires: FileRequires,
+	comments: { Types.Comment }
+): string
+	local lastHeaderCommentLine = nil
+	for _, comment in comments do
+		if comment.header then
+			lastHeaderCommentLine = comment.range["end"].line
+		end
+	end
+
+	local lastServiceGetLine = nil
+	for _, record in serviceGets do
+		lastServiceGetLine = math.max(lastServiceGetLine or 0, record.line)
+	end
+
+	local lastRequireLine = nil
+	for _, record in requires do
+		lastRequireLine = math.max(lastRequireLine or 0, record.line)
+	end
+
+	local lines = string.split(source, "\n")
+	local writeLine = 1
+	if lastRequireLine then
+		writeLine = lastRequireLine + 1
+	elseif lastServiceGetLine then
+		writeLine = lastServiceGetLine + 1
+	elseif lastHeaderCommentLine then
+		writeLine = lastHeaderCommentLine + 1
+	end
+
+	local spaceBefore = writeLine - 1 == lastHeaderCommentLine or writeLine - 1 == lastServiceGetLine
+	local spaceAfter = lines[writeLine] ~= nil and #lines[writeLine] > 0
+	if spaceBefore then
+		table.insert(lines, writeLine, "")
+		writeLine += 1
+	end
+	table.insert(lines, writeLine, TEMPLATE_STR)
+	if spaceAfter then
+		table.insert(lines, writeLine + 1, "")
+	end
+
+	return table.concat(lines, "\n")
+end
+
+local function lenientMatch(str0: string, str1: string)
+	local cmp0 = string.lower(str0)
+	local cmp1 = string.lower(str1)
+	return (string.find(cmp0, cmp1, 1, true) or string.find(cmp1, cmp0, 1, true)) ~= nil
+end
+
+local function substitute(source: string, match: string, replacement: string)
+	local i, j = string.find(source, match, 1, true)
+	assert(i and j)
+	return `{string.sub(source, 1, i - 1)}{replacement}{string.sub(source, j + 1)}`
 end
 
 local callback: Types.AutocompleteCallback = function(request, response)
@@ -137,174 +321,142 @@ local callback: Types.AutocompleteCallback = function(request, response)
 	end
 
 	local position = request.position
-	local slice = origin.document:GetText(1, 1, position.line, position.character)
+	local source = origin.document:GetText(1, 1, position.line, position.character)
 
-	local trigger = string.match(slice, `{PAT_IDENT}$`)
+	local trigger = string.match(source, `{PAT_IDENT}$`)
 	if not trigger then
 		return response
 	end
 
 	local priorPos = -#trigger - 1
-	local priorChar = string.sub(slice, priorPos, priorPos)
+	local priorChar = string.sub(source, priorPos, priorPos)
 	if priorChar == "." or priorChar == ":" then
 		return response -- probably an index or method call
-	elseif string.sub(slice, priorPos - 6, priorPos) == "local " then
-		return response -- probably a variable declaration
+	elseif priorChar == " " then
+		for _, excluded in excludePreceding do
+			local before = string.sub(source, priorPos - #excluded, priorPos - 1)
+			if before == excluded then
+				return response
+			end
+		end
 	end
 
-	-- we dont have to parse the whole file, just the slice
-	-- parser can handle a long comment/string being cut short by the slice (error tolerance)
-	-- get lexemes from slice (before we removed trigger) as we need to look at it
-	local lexemes = parseScript(slice)
-
+	local lexemes = AST.parse(source)
 	for _, comment in lexemes.comments do
-		if isInComment(position, comment) then
+		if AST.isInComment(position, comment) then
 			return response
 		end
 	end
 	for _, str in lexemes.strings do
-		if isInString(position, str) then
+		if AST.isInString(position, str) then
 			return response
 		end
 	end
 
-	local patch = origin.document:GetText(1, 1, position.line, position.character - #trigger)
-	local patchRange = {
-		start = { line = 1, character = 1 },
-		["end"] = position,
+	local items = table.clone(response.items)
+	local sourceNoTrigger = string.sub(source, 1, priorPos)
+	local positionNoTrigger = {
+		line = position.line,
+		character = position.character - #trigger - 1,
 	}
 
-	local lines = string.split(patch, "\n")
+	-- services
+	local serviceGets = getServiceGets(source)
+	local serviceNewTextTemplate =
+		computeServiceNewTextTemplate(sourceNoTrigger, positionNoTrigger, serviceGets, lexemes.comments)
+	for _, serviceName in serviceNames do
+		if serviceGets[serviceName] then
+			continue
+		elseif not lenientMatch(trigger, serviceName) then
+			continue
+		end
 
-	local lastCommentLine = 0
-	for _, comment in lexemes.comments do
-		if comment.header == true then
-			lastCommentLine = comment.range["end"].line
+		local acquireLine = `local {serviceName} = game:GetService("{serviceName}")`
+		local newText = substitute(serviceNewTextTemplate, TEMPLATE_STR, acquireLine)
+		newText = `{newText}{serviceName}`
+
+		table.insert(items, {
+			label = serviceName,
+			kind = Enum.CompletionItemKind.Snippet,
+			detail = `➡️ game:GetService("{serviceName}")`,
+			documentation = {
+				value = "Inserts a <code>GetService</code> at the top of the script.",
+			},
+			learnMoreLink = `https://create.roblox.com/docs/reference/engine/classes/{serviceName}`,
+			textEdit = {
+				newText = newText,
+				replace = {
+					start = { line = 1, character = 1 },
+					["end"] = position,
+				},
+			},
+		})
+	end
+
+	-- requires
+	local modules = watcher.getAccessible(origin.script)
+	local requires = getRequires(source)
+	local requireNewTextTemplate =
+		computeRequireNewTextTemplate(sourceNoTrigger, positionNoTrigger, serviceGets, requires, lexemes.comments)
+
+	local modulesByName = {}
+	for _, module in modules do
+		local name = module.Name
+		if not modulesByName[name] then
+			modulesByName[name] = {}
+		end
+		table.insert(modulesByName[name], module)
+	end
+
+	local moduleLabels = {}
+	for name, list in modulesByName do
+		if #list == 1 then
+			moduleLabels[list[1]] = name
+		else
+			for module, label in disambiguateModuleNames(name, list, {}) do
+				moduleLabels[module] = label
+			end
 		end
 	end
 
-	local requires = getRequires(patch)
-	local acquires = getServiceAcquisitions(patch)
-
-	-- if no header comments, write at line 1
-	-- otherwise, write at the first line after the last header comment
-	local writeLine = lastCommentLine + 1
-
-	-- if we are writing after a comment, ensure there is a blank line after the comment before we (would) write
-	if lastCommentLine > 0 then
-		local nextLine = lines[writeLine]
-		if isNonBlankLine(nextLine) or writeLine == #lines then
-			table.insert(lines, writeLine, "")
-			for _, item in requires do -- shift requires & services up one
-				item.lineNumber += 1
-			end
-			for _, item in acquires do
-				item.lineNumber += 1
-			end
-		end
-		writeLine += 1 -- go to the next line regardless
-	end
-
-	-- if any existing service acquires, place line after the last of them
-	for _, entry in acquires do
-		writeLine = math.max(writeLine, entry.lineNumber + 1)
-	end
-
-	-- ensure there is a space after any service we would insert
-	do
-		local nextLine = lines[writeLine]
-		if isNonBlankLine(nextLine) or writeLine == #lines then
-			table.insert(lines, writeLine, "")
-			for _, item in requires do -- shift requires & services up one
-				item.lineNumber += 1
-			end
-			for _, item in acquires do
-				item.lineNumber += 1
-			end
-		end
-		-- but don't increment writeline
-	end
-
-	local items = table.clone(response.items)
-
-	for _, module in getModules(origin.script) do
-		local identifier = getModuleIdentifier(module)
+	for _, module in modules do
+		local identifier = getSafeIdentifier(module.Name)
 		if requires[identifier] then
 			continue
-		end
-
-		local newLines = table.clone(lines)
-		local newWriteLine = writeLine
-		local shiftImportLinesBy = 0
-
-		local service, path = getModuleProvenance(module)
-
-		local serviceIdentifier = service.Name
-		if acquires[serviceIdentifier] then
-			-- already have a reference to this service; update variable
-			serviceIdentifier = acquires[serviceIdentifier].identifier
-		else
-			-- need to insert a reference to the service
-			local acquireSource = `local {serviceIdentifier} = game:GetService("{serviceIdentifier}")`
-			table.insert(newLines, newWriteLine, acquireSource)
-			newWriteLine += 1
-			shiftImportLinesBy += 1
-		end
-		newWriteLine += 1 -- known blank line
-
-		local requirePath = `{serviceIdentifier}{path}`
-		for _, entry in requires do
-			local useLineNumber = entry.lineNumber + shiftImportLinesBy + 1
-			newWriteLine = math.max(newWriteLine, useLineNumber)
-		end
-
-		local requireSource = `local {identifier} = require({requirePath})`
-		table.insert(newLines, newWriteLine, requireSource)
-
-		local finalLine = newWriteLine + 1
-		if isNonBlankLine(lines[finalLine]) or finalLine == #newLines then
-			table.insert(newLines, newWriteLine + 1, "")
-		end
-
-		table.insert(items, {
-			label = module.Name,
-			kind = Enum.CompletionItemKind.Snippet,
-			documentation = { value = "Auto-require" },
-			detail = module:GetFullName(),
-			textEdit = {
-				newText = table.concat(newLines, "\n") .. identifier,
-				replace = patchRange,
-			},
-		})
-	end
-
-	-- NB: does nothing with pluginonly currently
-
-	for _, service in services do
-		local identifier = service.name
-		if acquires[identifier] then
+		elseif not lenientMatch(trigger, identifier) then
 			continue
 		end
 
-		local newLines = table.clone(lines)
-		local acquireSource = `local {identifier} = game:GetService("{identifier}")`
-		table.insert(newLines, writeLine, acquireSource)
+		local item = {
+			label = moduleLabels[module],
+			kind = Enum.CompletionItemKind.Snippet,
+		}
 
-		local nextLine = newLines[writeLine + 1]
-		if isNonBlankLine(nextLine) or writeLine + 1 == #newLines then
-			table.insert(newLines, writeLine + 1, "")
+		local requirePath, isValidPath = getRequirePath(origin.script, module)
+		if not isValidPath then
+			item.tags = { Enum.CompletionItemTag.Deprecated }
+			item.documentation = { value = `Invalid module name or path: <code>{requirePath}</code>` }
+			item.textEdit = {
+				replace = { start = position, ["end"] = position },
+				newText = "",
+			}
+		else
+			local acquireLine = `local {identifier} = require("{requirePath}")`
+			local newText = substitute(requireNewTextTemplate, TEMPLATE_STR, acquireLine)
+			newText = `{newText}{identifier}`
+
+			item.detail = `➡️ require("{requirePath}")`
+			item.documentation = { value = "Inserts a <code>require</code> at the top of the script." }
+			item.textEdit = {
+				newText = newText,
+				replace = {
+					start = { line = 1, character = 1 },
+					["end"] = position,
+				},
+			}
 		end
 
-		table.insert(items, {
-			label = identifier,
-			kind = Enum.CompletionItemKind.Snippet,
-			documentation = { value = "Auto-service" },
-			learnMoreLink = `https://create.roblox.com/docs/reference/engine/classes/{identifier}`,
-			textEdit = {
-				newText = table.concat(newLines, "\n") .. identifier,
-				replace = patchRange,
-			},
-		})
+		table.insert(items, item)
 	end
 
 	return {
@@ -316,4 +468,5 @@ ScriptEditorService:RegisterAutocompleteCallback(CALLBACK_ID, 1, callback)
 
 plugin.Unloading:Connect(function()
 	ScriptEditorService:DeregisterAutocompleteCallback(CALLBACK_ID)
+	watcher.destroy()
 end)

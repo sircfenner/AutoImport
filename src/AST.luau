@@ -1,6 +1,7 @@
+--!optimize 2
 -- https://github.com/luau-lang/luau/blob/master/Ast/src/Lexer.cpp
 
-local Types = require(script.Parent.Types)
+local Types = require("./Types")
 
 local function isNewline(ch: string)
 	return ch == "\n"
@@ -12,12 +13,51 @@ end
 
 local function makeRange(start: Types.Position, finish: Types.Position): Types.Range
 	return {
-		start = start,
+		["start"] = start,
 		["end"] = finish,
 	}
 end
 
-local function parseScript(source: string): {
+local function isInLongRange(pos: Types.Position, range: Types.Range): boolean
+	local p0 = range["start"]
+	local p1 = range["end"]
+	if
+		pos.line == p0.line
+		and pos.character >= p0.character
+		and (pos.line < p1.line or pos.character <= p1.character)
+	then
+		return true -- first-line
+	elseif
+		pos.line == p1.line
+		and pos.character <= p1.character
+		and (pos.line > p0.line or pos.character >= p0.character)
+	then
+		return true -- last-line
+	elseif pos.line > p0.line and pos.line < p1.line then
+		return true -- mid-lines
+	end
+	return false
+end
+
+local function isInComment(pos: Types.Position, comment: Types.Comment): boolean
+	local range = comment.range
+	if comment.kind == "simple" then
+		return pos.line == range.start.line and pos.character >= range.start.character
+	end
+	return isInLongRange(pos, range)
+end
+
+local function isInString(pos: Types.Position, str: Types.String): boolean
+	local range = str.range
+	if str.kind == "quoted" then
+		local p0 = range["start"]
+		local p1 = range["end"]
+		return pos.line == p0.line and pos.character >= p0.character and pos.character <= p1.character
+	end
+	return isInLongRange(pos, range)
+end
+
+local function parse(source: string): {
 	comments: { Types.Comment },
 	strings: { Types.String },
 }
@@ -62,7 +102,6 @@ local function parseScript(source: string): {
 
 	local function readLongComment(start: Types.Position, sep: number): Types.Comment
 		consume() -- second [
-		local startOffset = offset
 
 		while offset <= length do
 			if peekCh() == "]" then
@@ -72,7 +111,6 @@ local function parseScript(source: string): {
 					return {
 						kind = "long",
 						range = makeRange(start, finish), -- includes final ]
-						text = string.sub(source, startOffset, offset - sep - 3),
 						header = false,
 					}
 				end
@@ -84,7 +122,6 @@ local function parseScript(source: string): {
 		return { -- broken/unfinished comment
 			kind = "long",
 			range = makeRange(start, position()),
-			text = string.sub(source, startOffset, offset),
 			header = false,
 		}
 	end
@@ -92,8 +129,6 @@ local function parseScript(source: string): {
 	local function readComment(): Types.Comment
 		local start = position()
 		offset += 2 -- two opening dashes
-
-		local startOffset = offset
 
 		if peekCh() == "[" then
 			local sep = skipLongSeparator()
@@ -109,14 +144,13 @@ local function parseScript(source: string): {
 		return {
 			kind = "simple",
 			range = makeRange(start, position()), -- includes newline/eof
-			text = string.sub(source, startOffset, offset - 1),
 			header = false,
 		}
 	end
 
 	local function readLongString(start: Types.Position, sep: number): Types.String
 		consume() -- second [
-		local startOffset = offset
+
 		while offset <= length do
 			if peekCh() == "]" then
 				if skipLongSeparator() == sep then
@@ -125,7 +159,6 @@ local function parseScript(source: string): {
 					return {
 						kind = "long",
 						range = makeRange(start, finish), -- includes final ]
-						text = string.sub(source, startOffset, offset - sep - 3),
 					}
 				end
 			else
@@ -136,7 +169,6 @@ local function parseScript(source: string): {
 		return { -- broken/unfinished string
 			kind = "long",
 			range = makeRange(start, position()),
-			text = string.sub(source, startOffset, offset),
 		}
 	end
 
@@ -158,14 +190,12 @@ local function parseScript(source: string): {
 		local delim = peekCh()
 		consume() -- delim
 
-		local startOffset = offset
 		while peekCh() ~= delim do
 			local ch = peekCh()
 			if ch == "" or ch == "\n" then
 				return {
 					kind = "quoted",
 					range = makeRange(start, position()), -- includes newline/eof
-					text = string.sub(source, startOffset, offset - 1),
 				}
 			elseif ch == "\\" then
 				skipBackslashInString()
@@ -180,7 +210,6 @@ local function parseScript(source: string): {
 		return {
 			kind = "quoted",
 			range = makeRange(start, finish), -- includes closing delim
-			text = string.sub(source, startOffset, offset - 2),
 		}
 	end
 
@@ -191,7 +220,6 @@ local function parseScript(source: string): {
 				return { -- broken interp
 					kind = "interp",
 					range = makeRange(start, position()),
-					text = string.sub(source, startOffset, offset - 1),
 				}
 			elseif ch == "\\" then
 				if string.sub(source, offset + 1, offset + 2) == "u{" then
@@ -208,14 +236,12 @@ local function parseScript(source: string): {
 					consume()
 					return {
 						kind = "interp",
-						range = makeRange(start, doubleBraceFinish),
-						text = "", -- broken double brace
+						range = makeRange(start, doubleBraceFinish), -- broken double brace
 					}
 				end
 				return {
 					kind = "interp", -- section
 					range = makeRange(start, finish),
-					text = string.sub(source, startOffset, offset - 1),
 				}
 			else
 				consume()
@@ -228,7 +254,6 @@ local function parseScript(source: string): {
 		return {
 			kind = "interp",
 			range = makeRange(start, finish),
-			text = string.sub(source, startOffset, offset - 1),
 		}
 	end
 
@@ -275,7 +300,6 @@ local function parseScript(source: string): {
 						line = finish.line,
 						character = finish.character - 1,
 					}),
-					text = "",
 				})
 				consume()
 			else
@@ -307,4 +331,8 @@ local function parseScript(source: string): {
 	}
 end
 
-return parseScript
+return {
+	parse = parse,
+	isInComment = isInComment,
+	isInString = isInString,
+}

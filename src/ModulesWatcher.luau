@@ -1,37 +1,34 @@
-local moduleServices = require(script.Parent.moduleServices)
-
-local excludedRoots = {
-	"_Index", -- wally
-	"node_modules", -- npm/yarn
+local targetRoots: { Instance } = {
+	game:GetService("Workspace"),
+	game:GetService("ReplicatedFirst"),
+	game:GetService("ReplicatedStorage"),
+	game:GetService("ServerScriptService"),
+	game:GetService("ServerStorage"),
+	game:GetService("StarterGui"),
+	game:GetService("StarterPack"),
+	game:GetService("StarterPlayer"),
 }
 
-local function isImportable(module: ModuleScript)
-	local parent = module.Parent
-	while parent and parent ~= game do
-		if parent:IsA("Folder") and table.find(excludedRoots, parent.Name) then
-			return false
-		end
-		parent = parent.Parent
-	end
-
-	return true
-end
-
-type Context = "server" | "shared" | "client"
-
-local serverDirectories = {
+local serverDirectories: { Instance } = {
 	game:GetService("ServerScriptService"),
 	game:GetService("ServerStorage"),
 }
 
-local clientDirectories = {
+local clientDirectories: { Instance } = {
 	game:GetService("StarterPlayer"),
 	game:GetService("StarterGui"),
 	game:GetService("StarterPack"),
 }
 
+local excludedRootNames = {
+	"_Index", -- wally
+	"node_modules", -- npm
+}
+
+type Context = "server" | "shared" | "client"
+
 local function getContext(container: LuaSourceContainer): Context
-	if container:IsA("LocalScript") then -- do this check first as localscript inherits script
+	if container:IsA("LocalScript") then -- do this check first because localscript inherits script
 		return "client"
 	elseif container:IsA("Script") then
 		if container.RunContext == Enum.RunContext.Client then
@@ -68,36 +65,69 @@ local function canAccess(origin: LuaSourceContainer, target: ModuleScript)
 	return true
 end
 
-local latestModules: { ModuleScript } = {}
-
-local function getModules(origin: LuaSourceContainer): { ModuleScript }
-	local modules = {}
-	for _, module in latestModules do
-		if canAccess(origin, module) then
-			table.insert(modules, module)
+local function isImportable(module: ModuleScript)
+	local parent = module.Parent
+	while parent and parent ~= game do
+		if parent:IsA("Folder") and table.find(excludedRootNames, parent.Name) then
+			return false
 		end
+		parent = parent.Parent
 	end
-
-	return modules
+	return true
 end
 
-for _, service in moduleServices do
-	for _, inst in service:GetDescendants() do
-		if inst:IsA("ModuleScript") and isImportable(inst) then
-			table.insert(latestModules, inst)
-		end
+local function create()
+	local latestModules: { ModuleScript } = {}
+	local cacheValid = false
+
+	local function invalidateCache()
+		cacheValid = false
 	end
-	service.DescendantAdded:Connect(function(inst)
-		if inst:IsA("ModuleScript") and isImportable(inst) then
-			table.insert(latestModules, inst)
+
+	local function getAll()
+		local modules = {}
+		for _, root in targetRoots do
+			for _, module in root:QueryDescendants("ModuleScript") do
+				if isImportable(module) then
+					table.insert(modules, module)
+				end
+			end
 		end
-	end)
-	service.DescendantRemoving:Connect(function(inst)
-		local index = table.find(latestModules, inst)
-		if index ~= nil then
-			table.remove(latestModules, index)
+
+		return modules
+	end
+
+	local function getAccessible(origin: LuaSourceContainer): { ModuleScript }
+		if not cacheValid then
+			latestModules = getAll()
+			cacheValid = true
 		end
-	end)
+
+		local modules = {}
+		for _, module in latestModules do
+			if canAccess(origin, module) then
+				table.insert(modules, module)
+			end
+		end
+
+		return modules
+	end
+
+	local addedConnection = game.DescendantAdded:Connect(invalidateCache)
+	local removedConnection = game.DescendantRemoving:Connect(invalidateCache)
+
+	local function destroy()
+		table.clear(latestModules)
+		addedConnection:Disconnect()
+		removedConnection:Disconnect()
+	end
+
+	return {
+		getAccessible = getAccessible,
+		destroy = destroy,
+	}
 end
 
-return getModules
+return {
+	create = create,
+}
