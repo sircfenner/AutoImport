@@ -1,0 +1,5 @@
+return {
+	luau = {
+		languagemode = "strict",
+	},
+}
