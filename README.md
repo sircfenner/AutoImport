@@ -1,18 +1,27 @@
-This plugin adds autocomplete suggestions to the Roblox Studio script editor for ModuleScripts in
-your project as well as Services that can be imported via GetService. Just begin typing the name of
-a ModuleScript or a Service and then select it from the autocomplete list.
+This plugin adds autocomplete suggestions to the Roblox Studio script editor for ModuleScripts (via 
+require) and Services (via GetService). Just begin typing the name of a ModuleScript or a Service and
+select it from the autocomplete list.
 
 <div align="center">
 
-https://github.com/sircfenner/AutoImport/assets/25118482/0d9222e1-8094-4982-a716-6d8b8f111d3a
+https://github.com/user-attachments/assets/6cbf72ba-6223-4959-832b-212a3a1ad0c9
 
 </div>
 
+### Improvements in new version
+
+-   Adopted string-requires instead of instance-requires (this also means a GetService is now only 
+    added when explicitly triggered, rather than being inserted to support instance requires as before)
+-   Improved performance significantly (faster parser, much better module/instance tracking)
+-   More context-aware: suggestions will no longer appear in some inappropriate places that they used to
+    (for example, inside a local statement or a type declaration)
+-   Improved layout and detail of autocomplete labels to indicate the path/service that will be inserted
+-   Disambiguation hints for modules with the same name are displayed on autocomplete labels
+-   Service completion items are now automatically generated from ReflectionService so will stay up-to-date
+
 ### Useful features
 
--   When requiring a ModuleScript, a GetService call may be automatically inserted to enable accessing
-    the module in the canonical way; if the service was already imported, it will use the variable
-    assigned to it instead
+-   When there are multiple modules with the same name, a minimal disambiguation path will be displayed
 -   Suggestions are sensitive to Luau syntax/context; for example, they will not appear while typing
     in comments or strings other than in the expression parts of interpolated strings
 -   Comment directives/hot comments at the top of the file (such as `--!strict`) are respected when
@@ -21,13 +30,11 @@ https://github.com/sircfenner/AutoImport/assets/25118482/0d9222e1-8094-4982-a716
     for example, inaccessible server modules are not suggested from client scripts
 -   Modules that are descendants of folders with names typically used by package managers
     ('node_modules' and '\_Index') are removed from autocomplete suggestions
--   Service completions are derived from the API dump at the time of building the plugin, so you can
-    re-build the plugin yourself following the steps below to stay up to date with the latest service
-    names
+-   Automatically uses relative require paths when an imported module is a sibling or descendant
 
 ### Installing the plugin
 
-You can pay for a pre-built version of the plugin via the 
+You can get a pre-built version of the plugin (for free) via the 
 [Roblox Creator Store](https://create.roblox.com/store/asset/18297441605/Auto-Import). Alternatively,
 follow the steps below to build it yourself, then add it to your local plugins folder.
 
@@ -36,12 +43,9 @@ follow the steps below to build it yourself, then add it to your local plugins f
 To build this plugin yourself:
 
 1. Clone the repo
-2. Install [foreman](https://github.com/Roblox/foreman), then run `foreman install`
+2. Install [rokit](https://github.com/rojo-rbx/rokit), then run `rokit install` in the repo
 3. Run `scripts/build.sh`
 
-If you are interested in making a contribution, run `scripts/dev.sh` with the `Reload plugins on
+To test local changes to the plugin, run `scripts/dev.sh` with the `Reload plugins on
 file changed` setting enabled in Studio. This will hot-reload the plugin as you make edits.
 
-### See also
-
-Existing plugin with similar functionality: <https://github.com/MonzterDev/Roblox-Auto-Import>
