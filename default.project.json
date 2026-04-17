@@ -1,8 +1,5 @@
 {
     "tree": {
-        "$path": "src",
-        "services": {
-            "$path": "services.json"
-        }
+        "$path": "src"
     }
 }
