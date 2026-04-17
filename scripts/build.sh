@@ -1,7 +1,1 @@
-#!/bin/sh
-
-set -e
-
-scripts/clean.sh
-lune run scripts/dump-services.luau
-rojo build -o import-plugin.rbxm default.project.json
+rojo build default.project.json --output plugin.rbxm
