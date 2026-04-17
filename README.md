@@ -34,7 +34,7 @@ https://github.com/user-attachments/assets/6cbf72ba-6223-4959-832b-212a3a1ad0c9
 
 ### Installing the plugin
 
-You can get a pre-built version of the plugin (for free) via the 
+You can get a pre-built version of the plugin in Releases or via the 
 [Roblox Creator Store](https://create.roblox.com/store/asset/18297441605/Auto-Import). Alternatively,
 follow the steps below to build it yourself, then add it to your local plugins folder.
 
