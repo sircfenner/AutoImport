@@ -11,6 +11,8 @@ local CALLBACK_ID = "sircfenner-auto-import-2"
 local TEMPLATE_STR = string.gsub(HttpService:GenerateGUID(false), "%-", "")
 
 local PAT_IDENT = `[_%a][_%w]*`
+local PAT_REQ = `({PAT_IDENT})%s*=%s*require%s*%b()%s*`
+local PAT_SRV = `({PAT_IDENT})%s*=%s*game%s*:%s*GetService%s*(%b())%s*`
 
 local watcher = ModulesWatcher.create()
 
@@ -23,6 +25,7 @@ end
 
 local excludePreceding = {
 	"local",
+	"const",
 	"export",
 	"type",
 	"function",
@@ -98,10 +101,14 @@ local function getRequirePath(origin: Instance, target: ModuleScript): (string, 
 end
 
 type FileRequires = { [string]: { line: number } }
+
 local function getRequires(source: string): FileRequires
 	local records = {}
 	for i, line in string.split(source, "\n") do
-		local ident = string.match(line, `^local%s*({PAT_IDENT})%s*=%s*require%s*%b()%s*$`)
+		local ident = string.match(line, `^local%s*{PAT_REQ}$`)
+		if not ident then
+			ident = string.match(line, `^const%s*{PAT_REQ}$`)
+		end
 		if ident then
 			records[ident] = {
 				line = i,
@@ -115,8 +122,11 @@ type FileServiceGets = { [string]: { line: number } }
 local function getServiceGets(source: string): FileServiceGets
 	local records = {}
 	for i, line in string.split(source, "\n") do
-		local identifier, call = string.match(line, `^local%s*({PAT_IDENT})%s*=%s*game%s*:%s*GetService%s*(%b())%s*$`)
-		if identifier and call then
+		local ident, call = string.match(line, `^local%s*{PAT_SRV}$`)
+		if not ident or not call then
+			ident, call = string.match(line, `^const%s*{PAT_SRV}$`)
+		end
+		if ident and call then
 			local name = string.sub(call, 3, -3) -- ("...")
 			records[name] = {
 				line = i,
@@ -371,7 +381,7 @@ local callback: Types.AutocompleteCallback = function(request, response)
 			continue
 		end
 
-		local acquireLine = `local {serviceName} = game:GetService("{serviceName}")`
+		local acquireLine = `const {serviceName} = game:GetService("{serviceName}")`
 		local newText = substitute(serviceNewTextTemplate, TEMPLATE_STR, acquireLine)
 		newText = `{newText}{serviceName}`
 
@@ -441,7 +451,7 @@ local callback: Types.AutocompleteCallback = function(request, response)
 				newText = "",
 			}
 		else
-			local acquireLine = `local {identifier} = require("{requirePath}")`
+			local acquireLine = `const {identifier} = require("{requirePath}")`
 			local newText = substitute(requireNewTextTemplate, TEMPLATE_STR, acquireLine)
 			newText = `{newText}{identifier}`
 
