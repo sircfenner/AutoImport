@@ -8,29 +8,19 @@ https://github.com/user-attachments/assets/6cbf72ba-6223-4959-832b-212a3a1ad0c9
 
 </div>
 
-### Improvements in new version
-
--   Adopted string-requires instead of instance-requires (this also means a GetService is now only 
-    added when explicitly triggered, rather than being inserted to support instance requires as before)
--   Improved performance significantly (faster parser, much better module/instance tracking)
--   More context-aware: suggestions will no longer appear in some inappropriate places that they used to
-    (for example, inside a local statement or a type declaration)
--   Improved layout and detail of autocomplete labels to indicate the path/service that will be inserted
--   Disambiguation hints for modules with the same name are displayed on autocomplete labels
--   Service completion items are now automatically generated from ReflectionService so will stay up-to-date
-
 ### Useful features
 
--   When there are multiple modules with the same name, a minimal disambiguation path will be displayed
--   Suggestions are sensitive to Luau syntax/context; for example, they will not appear while typing
-    in comments or strings other than in the expression parts of interpolated strings
--   Comment directives/hot comments at the top of the file (such as `--!strict`) are respected when
-    inserting code
+-   Automatically uses relative require paths when an imported module is a sibling or descendant
+-   GetService completion options are automatically kept up-to-date using ReflectionService
 -   Network boundaries and common practices for locating server/client-specific code are respected;
     for example, inaccessible server modules are not suggested from client scripts
+-   Suggestions are sensitive to Luau syntax/context; for example, they will not appear while typing
+    in comments or strings other than in the expression parts of interpolated strings
 -   Modules that are descendants of folders with names typically used by package managers
     ('node_modules' and '\_Index') are removed from autocomplete suggestions
--   Automatically uses relative require paths when an imported module is a sibling or descendant
+-   When there are multiple modules with the same name, a minimal disambiguation path will be displayed
+-   Comment directives/hot comments at the top of the file (such as `--!strict`) are respected when
+    inserting code
 
 ### Installing the plugin
 
